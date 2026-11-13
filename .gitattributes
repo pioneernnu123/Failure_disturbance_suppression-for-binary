@@ -1,0 +1,7 @@
+*.sh text eol=lf
+*.py text eol=lf
+Makefile text eol=lf
+*.mk text eol=lf
+memtester-master/conf-cc text eol=lf
+memtester-master/conf-ld text eol=lf
+rampage/userspace/phys_memctl text eol=lf

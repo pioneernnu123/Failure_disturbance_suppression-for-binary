@@ -1,0 +1,22 @@
+memtester version 4.5.1 (64-bit)
+Copyright (C) 2001-2020 Charles Cazabon.
+Licensed under the GNU General Public License version 2 (only).
+
+pagesize is 4096
+pagesizemask is 0xfffffffffffff000
+using testmask 0x80000000
+命令行指定错误注入页：1
+命令行指定注入类型：1 (test_stuck_address：检测地址线故障，写入地址值后读回，确认每个地址单元存的是自己的地址而非别人的数据)
+want 16MB (16777216 bytes)
+got  16MB (16777216 bytes), trying mlock ...locked.
+
+=== Memory Page Info ===
+Page size: 4096 bytes
+bufa pages: [34359289030 .. 34359291077]
+bufb pages: [34359291077 .. 34359293124]
+=========================
+Loop 1/1:
+  Stuck Address       : FAILURE: possible bad address line at offset 0x00001000.
+Skipping to next test...
+
+Done.
