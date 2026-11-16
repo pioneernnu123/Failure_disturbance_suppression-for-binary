@@ -167,24 +167,45 @@ static int rampage_test_id(size_t index) {
     return 8 + (int)index;
 }
 
+static int write_failure(FILE *result, int type, const struct rampage_failure *failure) {
+    return fprintf(result, "BAD %d %zu %c %lu %lu\n", type, failure->offset,
+                   failure->side, failure->expected, failure->observed) < 0;
+}
+
 static int write_failures(FILE *result, int type) {
     size_t i;
 
     for (i = 0; i < rampage_failure_count; i++) {
-        const struct rampage_failure *failure = &rampage_failures[i];
-        fprintf(result, "BAD %d %zu %c %lu %lu\n", type, failure->offset,
-                failure->side, failure->expected, failure->observed);
+        if (write_failure(result, type, &rampage_failures[i]))
+            return -1;
     }
     return !rampage_failure_count || fflush(result) != 0;
+}
+
+static int run_rampage_pattern(ulv *bufa, ulv *bufb, size_t count, size_t pagesize,
+                               size_t index, FILE *result) {
+    memset((void *)bufa, 255, pagesize);
+    printf("  %-20s: ", tests[index].name);
+    fflush(stdout);
+    rampage_reset_failure();
+    if (!tests[index].fp(bufa, bufb, count)) {
+        puts("ok");
+        return 0;
+    }
+    if (write_failures(result, rampage_test_id(index)))
+        return EXIT_FAIL_OTHERTEST | EXIT_FAIL_NONSTARTER;
+    return EXIT_FAIL_OTHERTEST;
 }
 
 static int run_rampage_pages(int mapped_fd, int result_fd, unsigned long long session_id,
                              size_t bytes, size_t pagesize, ul testmask) {
     size_t page_index, page_count = bytes / pagesize;
     size_t count = (pagesize / 2) / sizeof(ul);
+    struct rampage_failure *address_failures;
     void *mapping;
     FILE *result;
     int exit_code = 0;
+    int requested_injection = inject_kind;
 
     mapping = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, mapped_fd, 0);
     if (mapping == MAP_FAILED) {
@@ -198,17 +219,18 @@ static int run_rampage_pages(int mapped_fd, int result_fd, unsigned long long se
         return EXIT_FAIL_NONSTARTER;
     }
     rampage_expected = malloc(pagesize);
-    if (!rampage_expected) {
-        perror("RAMpage expected-value allocation failed");
-        fclose(result);
-        munmap(mapping, bytes);
-        return EXIT_FAIL_NONSTARTER;
+    address_failures = calloc(page_count, sizeof(*address_failures));
+    if (!rampage_expected || !address_failures) {
+        perror("RAMpage test allocation failed");
+        exit_code = EXIT_FAIL_NONSTARTER;
+        goto out;
     }
     rampage_expected_count = pagesize / sizeof(ul);
 
     rampage_test_base = (uintptr_t)mapping;
     inject_bufa_start = (uintptr_t)mapping;
     inject_pagesize = pagesize;
+    inject_kind = 0;
     rampage_result = result;
     fprintf(result, "RAMPAGE_RESULT_V3 %llu %zu\n", session_id, page_count);
     if (fflush(result) != 0) {
@@ -216,45 +238,73 @@ static int run_rampage_pages(int mapped_fd, int result_fd, unsigned long long se
         goto out;
     }
 
+    printf("  %-20s: ", "Stuck Address (batch)");
+    fflush(stdout);
+    if (test_rampage_address_lines(mapping, page_count, pagesize / sizeof(ul),
+                                  address_failures)) {
+        exit_code |= EXIT_FAIL_ADDRESSLINES;
+        puts("failed");
+        for (page_index = 0; page_index < page_count; page_index++) {
+            if (address_failures[page_index].side &&
+                write_failure(result, 1, &address_failures[page_index])) {
+                exit_code |= EXIT_FAIL_NONSTARTER;
+                goto out;
+            }
+        }
+        if (fflush(result) != 0) {
+            exit_code |= EXIT_FAIL_NONSTARTER;
+            goto out;
+        }
+    } else {
+        puts("ok");
+    }
+
     for (page_index = 0; page_index < page_count; page_index++) {
         ulv *bufa = (ulv *)((char *)mapping + page_index * pagesize);
         ulv *bufb = (ulv *)((char *)bufa + pagesize / 2);
-        ul i;
+        int target = requested_injection && inject_page_rel >= 0 &&
+                     (size_t)inject_page_rel == page_index;
+        size_t injection_test = SIZE_MAX;
+        int page_status = 0;
+        size_t i;
 
         printf("Page %zu/%zu:\n", page_index + 1, page_count);
-        printf("  %-20s: ", "Stuck Address");
-        fflush(stdout);
-        rampage_reset_failure();
-        if (!test_stuck_address(bufa, pagesize / sizeof(ul))) {
-            printf("ok\n");
-        } else {
-            exit_code |= EXIT_FAIL_ADDRESSLINES;
-            if (write_failures(result, 1)) {
-                exit_code |= EXIT_FAIL_NONSTARTER;
-                break;
-            }
+        if (address_failures[page_index].side) {
+            puts("Skipping page with address-line failure.");
             continue;
         }
-
         for (i = 0; tests[i].name; i++) {
-            if (testmask && !((1UL << i) & testmask)) {
+            if (testmask && !((1UL << i) & testmask))
                 continue;
-            }
-            memset((void *)bufa, 255, pagesize);
-            printf("  %-20s: ", tests[i].name);
-            fflush(stdout);
-            rampage_reset_failure();
-            if (!tests[i].fp(bufa, bufb, count)) {
-                printf("ok\n");
-            } else {
-                exit_code |= EXIT_FAIL_OTHERTEST;
-                if (write_failures(result, rampage_test_id(i)))
-                    exit_code |= EXIT_FAIL_NONSTARTER;
+            if (target && rampage_test_id(i) == requested_injection)
+                injection_test = i;
+            page_status = run_rampage_pattern(bufa, bufb, count, pagesize, i, result);
+            if (page_status)
                 break;
-            }
-            fflush(stdout);
         }
 
+        /* Finish the unmodified page's tests before doing a separate injection. */
+        if (target && !page_status) {
+            inject_kind = requested_injection;
+            if (inject_kind == 1) {
+                printf("  %-20s: ", "Stuck Address (injection)");
+                fflush(stdout);
+                rampage_reset_failure();
+                if (test_stuck_address(bufa, pagesize / sizeof(ul))) {
+                    page_status = EXIT_FAIL_ADDRESSLINES;
+                    if (write_failures(result, 1))
+                        page_status |= EXIT_FAIL_NONSTARTER;
+                } else {
+                    puts("ok");
+                }
+            } else if (injection_test != SIZE_MAX) {
+                page_status = run_rampage_pattern(bufa, bufb, count, pagesize,
+                                                  injection_test, result);
+            }
+            inject_kind = 0;
+        }
+
+        exit_code |= page_status;
         if (exit_code & EXIT_FAIL_NONSTARTER)
             break;
         printf("\n");
@@ -269,13 +319,14 @@ out:
     if (!(exit_code & EXIT_FAIL_NONSTARTER) && !ferror(result)) {
         if (rampage_injection_offset == SIZE_MAX)
             fprintf(result, "INJECT NONE\n");
-        fprintf(result, "END\n");
+        fprintf(result, "END CHECKED\n");
     }
     if (fclose(result) != 0) {
         perror("RAMpage result close failed");
         exit_code |= EXIT_FAIL_NONSTARTER;
     }
     rampage_result = NULL;
+    free(address_failures);
     free(rampage_expected);
     rampage_expected = NULL;
     rampage_expected_count = 0;

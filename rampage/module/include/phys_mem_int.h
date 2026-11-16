@@ -27,6 +27,7 @@ struct phys_mem_session {
 };
 
 struct phys_mem_isolation {
+	struct list_head released_link;
 	struct page *page; /* NULL after a successful restore */
 	__u64 run_id;
 	__u64 session_id;

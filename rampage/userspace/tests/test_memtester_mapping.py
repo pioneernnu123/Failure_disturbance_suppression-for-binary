@@ -38,21 +38,21 @@ class ProtocolTests(unittest.TestCase):
     def test_result_requires_session_and_real_offset(self):
         failures, injection, error = MemtesterWrapper._parse_result(
             "RAMPAGE_RESULT_V3 42 8\nBAD 2 20480 A 100 101\n"
-            "INJECT 2 5 20480 100 101\nEND\n", 42, 8, 4096)
+            "INJECT 2 5 20480 100 101\nEND CHECKED\n", 42, 8, 4096)
         self.assertIsNone(error)
         self.assertEqual(failures, (Failure(2, 20480, "A", 100, 101),))
         self.assertEqual(injection, Injection(2, 5, 20480, 100, 101))
         _, ineffective, error = MemtesterWrapper._parse_result(
-            "RAMPAGE_RESULT_V3 42 8\nINJECT 2 5 20480 100 100\nEND\n",
+            "RAMPAGE_RESULT_V3 42 8\nINJECT 2 5 20480 100 100\nEND CHECKED\n",
             42, 8, 4096)
         self.assertFalse(ineffective.effective)
         self.assertIsNone(error)
         failures, _, error = MemtesterWrapper._parse_result(
-            "RAMPAGE_RESULT_V3 99 8\nINJECT NONE\nEND\n", 42, 8, 4096)
+            "RAMPAGE_RESULT_V3 99 8\nINJECT NONE\nEND CHECKED\n", 42, 8, 4096)
         self.assertFalse(failures)
         self.assertIn("matching session header", error)
         failures, _, error = MemtesterWrapper._parse_result(
-            "RAMPAGE_RESULT_V3 42 8\nBAD 2 32768 A 100 101\nINJECT NONE\nEND\n",
+            "RAMPAGE_RESULT_V3 42 8\nBAD 2 32768 A 100 101\nINJECT NONE\nEND CHECKED\n",
             42, 8, 4096)
         self.assertFalse(failures)
         self.assertIn("invalid memtester result", error)
@@ -64,6 +64,14 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(failures, (Failure(2, 20480, "A", 100, 101),))
         self.assertTrue(injection.effective)
         self.assertIn("complete session result", error)
+
+    def test_legacy_result_preserves_evidence_without_confirming_verification(self):
+        failures, injection, error = MemtesterWrapper._parse_result(
+            "RAMPAGE_RESULT_V3 42 8\nINJECT 2 5 20480 100 101\n"
+            "BAD 2 20480 A 100 101\nEND\n", 42, 8, 4096)
+        self.assertEqual(failures, (Failure(2, 20480, "A", 100, 101),))
+        self.assertTrue(injection.effective)
+        self.assertIn("rebuild memtester", error)
 
     def test_wrapper_passes_session_descriptor_and_distinguishes_failure(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -83,7 +91,7 @@ class ProtocolTests(unittest.TestCase):
                     seen.append((command, pass_fds))
                     result_fd = int(command[command.index("-R") + 1])
                     os.write(result_fd, b"RAMPAGE_RESULT_V3 42 8\n"
-                               b"BAD 2 20480 A 100 101\nINJECT 2 5 20480 100 101\nEND\n")
+                               b"BAD 2 20480 A 100 101\nINJECT 2 5 20480 100 101\nEND CHECKED\n")
                     return types.SimpleNamespace(returncode=4)
 
                 with mock.patch("tester.memtester_wrapper.subprocess.run", side_effect=fake_run):
@@ -121,7 +129,7 @@ class ProtocolTests(unittest.TestCase):
                     report += f"INJECT {kind} 5 {offset} 100 101\nBAD {kind} {offset} A 100 101\n"
                 else:
                     report += "INJECT NONE\n"
-                os.write(result_fd, (report + "END\n").encode())
+                os.write(result_fd, (report + "END CHECKED\n").encode())
                 return types.SimpleNamespace(returncode={0: 0, 1: 2, 7: 4}[kind])
 
             with mock.patch("tester.memtester_wrapper.subprocess.run", side_effect=fake_run):
@@ -230,6 +238,7 @@ class SchedulerTests(unittest.TestCase):
         output = StringIO()
 
         def fake_round(run_id, page_count, tester):
+            self.assertIsNone(tester.binary)
             counts.append(page_count)
             tester.report_injection(0)
             if len(counts) == 3:
@@ -242,7 +251,8 @@ class SchedulerTests(unittest.TestCase):
                                held if len(counts) == 2 else (), (), 0, 0)
 
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(output), mock.patch.object(
-                SlowScheduler, "run_round", side_effect=fake_round):
+                SlowScheduler, "run_round", side_effect=fake_round), mock.patch.object(
+                Path, "is_file", return_value=True):
             log_path = Path(directory) / "memtester-slow.log"
             state_path = Path(directory) / "injection.state"
             code = interactive.main([

@@ -6,7 +6,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 #include "types.h"
 #include "memtester.h"
@@ -21,6 +23,41 @@ extern ssize_t inject_page_rel;
 extern int inject_kind;
 extern int inject_once;
 extern int compare_regions(ulv *bufa, ulv *bufb, size_t count);
+
+static int test_cross_page_alias(void)
+{
+    size_t page_size = sysconf(_SC_PAGESIZE);
+    struct rampage_failure failures[3] = {0};
+    FILE *file = tmpfile();
+    unsigned char *mapping = MAP_FAILED;
+    int status = 1;
+
+    if (!file)
+        return 1;
+    if (ftruncate(fileno(file), 3 * page_size) != 0)
+        goto out;
+    mapping = mmap(NULL, 3 * page_size, PROT_READ | PROT_WRITE, MAP_SHARED, fileno(file), 0);
+    if (mapping == MAP_FAILED)
+        goto out;
+
+    rampage_test_base = (uintptr_t)mapping;
+    if (test_rampage_address_lines((ulv *)mapping, 3, page_size / sizeof(ul), failures))
+        goto out;
+    if (mmap(mapping + 2 * page_size, page_size, PROT_READ | PROT_WRITE,
+             MAP_SHARED | MAP_FIXED, fileno(file), 0) == MAP_FAILED)
+        goto out;
+    if (test_rampage_address_lines((ulv *)mapping, 3, page_size / sizeof(ul), failures) == -1 &&
+        failures[0].side == 'A' && failures[0].offset < page_size && !failures[1].side &&
+        failures[2].side == 'A' && failures[2].offset / page_size == 2)
+        status = 0;
+
+out:
+    rampage_test_base = 0;
+    if (mapping != MAP_FAILED)
+        munmap(mapping, 3 * page_size);
+    fclose(file);
+    return status;
+}
 
 int main(void)
 {
@@ -73,6 +110,26 @@ int main(void)
             free(rampage_expected);
             return 1;
         }
+        for (size_t i = 1; i < (kind == 1 ? 2 * count : count); i++) {
+            if (a[i] != rampage_expected[i]) {
+                fprintf(stderr, "kind %d modified a second word\n", kind);
+                return 1;
+            }
+        }
+        if (kind == 2) {
+            /* The simulated change at the first word must not hide a late fault. */
+            size_t last_word_offset = (target + 1) * page_size - sizeof(ul);
+
+            b[count - 1] ^= 1;
+            rampage_failure_count = 0;
+            if (compare_regions(a, b, count) != -1 || rampage_failure_count != 2 ||
+                rampage_failures[0].offset != rampage_injection_offset ||
+                rampage_failures[1].side != 'B' ||
+                rampage_failures[1].offset / sizeof(ul) != last_word_offset / sizeof(ul)) {
+                fprintf(stderr, "a later fault was masked by the injection\n");
+                return 1;
+            }
+        }
     }
     {
         ulv *a = (ulv *)(buffer + target * page_size);
@@ -100,6 +157,10 @@ int main(void)
     }
     free(rampage_expected);
     free(buffer);
-    puts("all seven injection types reported the target byte offset");
+    if (test_cross_page_alias()) {
+        fprintf(stderr, "failed to identify both pages of a cross-page alias\n");
+        return 1;
+    }
+    puts("injection offsets, mixed faults, and cross-page alias checks passed");
     return 0;
 }

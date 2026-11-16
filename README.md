@@ -2,28 +2,29 @@
 
 适用于 RISC-V 服务器的现有 Linux 内核。编译需要与运行内核匹配的头文件、配置和 `Module.symvers`。从项目根目录开始执行。
 
-## 一 编译驱动和 memtester
+## 一 编译和安装 memtester
 
 ```bash
-cd rampage/module
-make KDIR=/home/lzu/sg2042-vendor-kernel-6.1
-cd ../../memtester-master
+cd memtester-master
 make
+sudo make install
 cd ..
 ```
 
-上面的 `KDIR` 是在 `k8snode1` 上验证过的构建目录。其他打包环境应使用与目标内核兼容的构建目录。
-在 `rampage/module` 目录运行 `sh ./rebuild.sh` 可一次编译并加载。脚本调用
-`make`，由 Makefile 使用默认的内核构建目录。当前 `k8snode1` 的默认目录缺失，
-在该服务器上执行 `KDIR=/home/lzu/sg2042-vendor-kernel-6.1 sh ./rebuild.sh`。
+更新检测程序时，请同时重编 memtester，以便校验测试页并确认故障来源。
 
-## 二 加载驱动
+## 二 编译并加载驱动
 
-替换已加载的旧驱动时，先执行 `sudo rmmod phys_mem`。
+`k8snode1` 的默认内核构建目录缺失，执行以下命令。
 
 ```bash
-sudo insmod rampage/module/phys_mem.ko
+cd rampage/module
+chmod +x rebuild.sh
+KDIR=/home/lzu/sg2042-vendor-kernel-6.1 ./rebuild.sh
+cd ../..
 ```
+
+服务器有匹配的 `/lib/modules/$(uname -r)/build` 时，可以直接执行 `./rebuild.sh`。
 
 ## 三 持续检测和手动注入
 
@@ -58,7 +59,7 @@ sudo python3 injection_control.py
 从 `rampage/userspace` 目录执行。
 
 ```bash
-sudo python3 run_memory_test.py --memtester=../../memtester-master/memtester
+sudo python3 run_memory_test.py
 ```
 
 程序先跑无注入基线，再依次执行四项用例。通过时结果为 `5/5`、`3/3`、`2/2`、`5/5`。每轮日志和 `summary.json` 自动写入终端打印的结果目录。
@@ -79,3 +80,4 @@ sudo ./phys_memctl status --run-id 批次号 | tee -a restore.log
 ```
 
 恢复结果应显示 `failed=0`，随后查询应显示 `simulated=0`。来源不明的页继续扣留。
+已恢复的记录在表满时按恢复顺序复用表项。需要长期留存时，保存检测日志和恢复前后的查询结果。

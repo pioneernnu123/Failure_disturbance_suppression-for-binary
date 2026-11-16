@@ -121,8 +121,12 @@ class MemtesterWrapper(ScannerBaseclass):
                         raise ValueError
                     injection = Injection(kind, page, offset, before, after)
                     seen_inject = True
-                elif parts == ["END"] and seen_inject:
+                elif parts == ["END", "CHECKED"] and seen_inject:
                     complete = True
+                elif parts == ["END"] and seen_inject:
+                    # Keep old BAD records, but the old binary may have stopped at the injection.
+                    complete = True
+                    error = error or "rebuild memtester to enable full-page verification"
                 else:
                     raise ValueError
             except ValueError:

@@ -28,7 +28,7 @@ module_param(max_isolation_records, uint, 0444);
 MODULE_PARM_DESC(max_session_pages, "Maximum pages in one test session");
 MODULE_PARM_DESC(max_total_pages, "Maximum pages allocated by the module");
 MODULE_PARM_DESC(max_isolated_pages, "Maximum simultaneously held or pending pages");
-MODULE_PARM_DESC(max_isolation_records, "Maximum isolation records including restored pages");
+MODULE_PARM_DESC(max_isolation_records, "Maximum isolation records, with restored slots reused as needed");
 
 static dev_t phys_mem_devno;
 static struct cdev phys_mem_cdev;
@@ -118,6 +118,6 @@ static void __exit phys_mem_exit(void)
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("LZU DSLAB");
 MODULE_DESCRIPTION("Session-owned test pages with module-held isolation");
-MODULE_VERSION("3.0");
+MODULE_VERSION("3.1");
 module_init(phys_mem_init);
 module_exit(phys_mem_exit);

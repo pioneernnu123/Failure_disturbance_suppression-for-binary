@@ -17,6 +17,9 @@
 /* Function declaration. */
 
 int test_stuck_address(unsigned long volatile *bufa, size_t count);
+struct rampage_failure;
+int test_rampage_address_lines(unsigned long volatile *bufa, size_t pages,
+                               size_t words_per_page, struct rampage_failure *page_failures);
 int test_random_value(unsigned long volatile *bufa, unsigned long volatile *bufb, size_t count);
 int test_xor_comparison(unsigned long volatile *bufa, unsigned long volatile *bufb, size_t count);
 int test_sub_comparison(unsigned long volatile *bufa, unsigned long volatile *bufb, size_t count);

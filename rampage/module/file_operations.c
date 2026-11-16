@@ -11,6 +11,22 @@
 #include "phys_mem_int.h"
 
 static atomic64_t next_session_id = ATOMIC64_INIT(0);
+static LIST_HEAD(phys_mem_released_records);
+
+/* Called under phys_mem_lock. Keep restored records until their slots are needed. */
+static struct phys_mem_isolation *phys_mem_next_record(void)
+{
+	struct phys_mem_isolation *entry;
+
+	if (phys_mem_records < max_isolation_records)
+		return &phys_mem_table[phys_mem_records++];
+	if (list_empty(&phys_mem_released_records))
+		return NULL;
+	entry = list_first_entry(&phys_mem_released_records,
+				 struct phys_mem_isolation, released_link);
+	list_del(&entry->released_link);
+	return entry;
+}
 
 static int phys_mem_open(struct inode *inode, struct file *file)
 {
@@ -44,13 +60,12 @@ void phys_mem_release_session(struct phys_mem_session *session)
 			phys_mem_total_pages--;
 			continue;
 		}
-		/* REPORT reserved both capacities before setting PENDING. */
-		if (WARN_ON(phys_mem_records >= max_isolation_records ||
-			    phys_mem_held >= max_isolated_pages)) {
-			/* Never return a reported bad page to the allocator. */
+		/* The live-page reservation guarantees a slot for this report. */
+		if (WARN_ON(phys_mem_held >= max_isolated_pages))
 			continue;
-		}
-		entry = &phys_mem_table[phys_mem_records++];
+		entry = phys_mem_next_record();
+		if (WARN_ON(!entry))
+			continue;
 		WARN_ON_ONCE(page_mapped(test->page));
 		entry->page = test->page;
 		entry->run_id = session->run_id;
@@ -61,6 +76,7 @@ void phys_mem_release_session(struct phys_mem_session *session)
 		entry->error_type = test->error_type;
 		entry->origin = test->origin;
 		entry->state = PHYS_MEM_PAGE_HELD;
+		entry->last_error = 0;
 		__module_get(THIS_MODULE); /* Refuse normal rmmod while held. */
 		phys_mem_pending--;
 		phys_mem_held++;
@@ -107,9 +123,7 @@ static long phys_mem_allocate_ioctl(struct phys_mem_session *session,
 		goto out;
 	}
 	/* Reserve a quarantine slot for every live test page. */
-	if (req.num_pages > max_isolation_records - phys_mem_records -
-			    (phys_mem_total_pages - phys_mem_held) ||
-	    req.num_pages > max_isolated_pages - phys_mem_total_pages ||
+	if (req.num_pages > max_isolated_pages - phys_mem_total_pages ||
 	    req.num_pages > max_total_pages - phys_mem_total_pages) {
 		ret = -ENOSPC;
 		goto out;
@@ -209,8 +223,7 @@ static long phys_mem_report_ioctl(struct phys_mem_session *session,
 		req.state = test->state;
 		goto out;
 	}
-	if (phys_mem_held + phys_mem_pending >= max_isolated_pages ||
-	    phys_mem_records + phys_mem_pending >= max_isolation_records) {
+	if (phys_mem_held + phys_mem_pending >= max_isolated_pages) {
 		ret = -ENOSPC;
 		goto out;
 	}
@@ -353,6 +366,7 @@ static long phys_mem_restore_ioctl(void __user *arg)
 		entry->page = NULL;
 		entry->state = PHYS_MEM_PAGE_RELEASED;
 		entry->last_error = 0;
+		list_add_tail(&entry->released_link, &phys_mem_released_records);
 		phys_mem_held--;
 		phys_mem_total_pages--;
 		module_put(THIS_MODULE);

@@ -38,7 +38,7 @@ from injection_state import (DEFAULT_INJECTION_STATE_PATH, INJECTION_TYPE_NAMES,
 from physmem import PAGE_SIZE
 from run_memory_test import serialize_round
 from scheduling.slow.slow_scheduler import SlowScheduler
-from tester.memtester_wrapper import MEMTESTER_BIN, MemtesterWrapper
+from tester.memtester_wrapper import MemtesterWrapper
 
 
 def parse_memory_size(value):
@@ -78,8 +78,6 @@ def main(argv=None):
     if options.scan_mode == "full" and options.max_memory is not None:
         parser.error("--max-memory requires --scan-mode=local")
 
-    tree_binary = Path(__file__).resolve().parent / "../../memtester-master/memtester"
-    binary = options.memtester or (tree_binary if tree_binary.is_file() else MEMTESTER_BIN)
     pass_pages = None if options.max_memory is None else options.max_memory // PAGE_SIZE
     log_path = options.logfile
     if log_path is None and options.scan_mode == "local":
@@ -103,7 +101,7 @@ def main(argv=None):
         tester = MemtesterWrapper(extra_args=options.memtester_args,
                                   injection_type=options.memtester_inject_type,
                                   injection_state_path=options.memtester_inject_file,
-                                  binary=binary, initialize_injection=False,
+                                  binary=options.memtester, initialize_injection=False,
                                   report_injection=report_injection)
         minimum_pages = 1 if tester.inject_page is None else tester.inject_page + 1
         if options.memtester_inject_type and tester.inject_page is None:

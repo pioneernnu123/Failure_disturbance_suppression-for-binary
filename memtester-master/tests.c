@@ -25,7 +25,7 @@
 #include "memtester.h"
 #include "output.h"
 
-#define ONE 0x00000001L
+#define ONE 1UL
 //ba
 uintptr_t inject_bufa_start = 0;    // bufa 起始虚拟地址
 size_t inject_pagesize = 0;         // 页面大小
@@ -59,7 +59,10 @@ static size_t byte_offset(ulv *word, ul expected, ul observed) {
 }
 
 static void record_failure(ulv *word, char side, ul expected, ul observed) {
-    if (rampage_test_base) {
+    /* One finding can be the injected word. A second proves the page has
+     * another fault, so two records suffice for the isolation decision. */
+    if (rampage_test_base &&
+        rampage_failure_count < sizeof(rampage_failures) / sizeof(rampage_failures[0])) {
         rampage_failures[rampage_failure_count++] = (struct rampage_failure) {
             byte_offset(word, expected, observed), side, expected, observed
         };
@@ -78,7 +81,7 @@ static int injection_targets(ulv *bufa, size_t count, int kind) {
     return target < end && (target >= start || start - target < inject_pagesize);
 }
 
-/* Flip the original low bit in each selected A-side word. */
+/* In RAMpage mode, flip one word so all other differences are unexplained. */
 static int rampage_inject(ulv *bufa, size_t count, int kind) {
     size_t i;
 
@@ -120,6 +123,7 @@ static int rampage_inject(ulv *bufa, size_t count, int kind) {
             record_failure(&bufa[i], 'A', intended, observed);
             return -1;
         }
+        return 0;
     }
     return 0;
 }
@@ -161,9 +165,11 @@ int compare_regions(ulv *bufa, ulv *bufb, size_t count) {
                 record_failure(p1, 'A', expected, a);
             if (b != expected)
                 record_failure(p2, 'B', expected, b);
-            fprintf(stderr, "FAILURE: A=%#lx B=%#lx expected=%#lx at word offset %#zx.\n",
-                    a, b, expected, i * sizeof(ul));
-            return -1;
+            if (!result)
+                fprintf(stderr, "FAILURE: A=%#lx B=%#lx expected=%#lx at word offset %#zx.\n",
+                        a, b, expected, i * sizeof(ul));
+            result = -1;
+            continue;
         }
         if (a != b) {
             if (use_phys) {
@@ -192,33 +198,48 @@ static int compare_with_injection(ulv *bufa, ulv *bufb, size_t count, int kind) 
     return compare_regions(bufa, bufb, count);
 }
 
-int test_stuck_address(ulv *bufa, size_t count) {
-    ulv *p1 = bufa;
+static int test_address_lines(ulv *bufa, size_t count, size_t words_per_page,
+                              struct rampage_failure *page_failures) {
     unsigned int j;
     size_t i;
-    off_t physaddr;
+    int result = 0;
 
     out_test_start();
     for (j = 0; j < 16; j++) {
-        p1 = (ulv *) bufa;
         out_test_setting(j);
+        /* Both write orders expose both ends of a cross-page alias. */
         for (i = 0; i < count; i++) {
-            ul expected = ((j + i) % 2) == 0 ? (ul)p1 : ~((ul)p1);
-            rampage_expect(i, expected);
-            *p1++ = expected;
+            size_t index = (page_failures && (j & 2)) ? count - 1 - i : i;
+            ulv *word = bufa + index;
+            ul expected = ((j + index) % 2) == 0 ? (ul)word : ~((ul)word);
+
+            if (!page_failures)
+                rampage_expect(index, expected);
+            *word = expected;
         }
-        if (rampage_inject(bufa, count, 1))
+        if (!page_failures && rampage_inject(bufa, count, 1))
             return -1;
         out_test_testing(j);
-        p1 = (ulv *) bufa;
-        for (i = 0; i < count; i++, p1++) {
-            ul expected = ((j + i) % 2) == 0 ? (ul)p1 : ~((ul)p1);
-            ul observed = *p1;
+        for (i = 0; i < count; i++) {
+            ulv *word = bufa + i;
+            ul expected = ((j + i) % 2) == 0 ? (ul)word : ~((ul)word);
+            ul observed = *word;
 
-            if (observed != expected) {
-                record_failure(p1, 'A', expected, observed);
+            if (observed == expected)
+                continue;
+            if (page_failures) {
+                struct rampage_failure *failure = &page_failures[i / words_per_page];
+
+                if (!failure->side)
+                    *failure = (struct rampage_failure) {
+                        byte_offset(word, expected, observed), 'A', expected, observed
+                    };
+            } else {
+                record_failure(word, 'A', expected, observed);
+            }
+            if (!result) {
                 if (use_phys) {
-                    physaddr = physaddrbase + (i * sizeof(ul));
+                    off_t physaddr = physaddrbase + (i * sizeof(ul));
                     fprintf(stderr,
                             "FAILURE: possible bad address line at physical "
                             "address 0x%08lx.\n",
@@ -229,14 +250,28 @@ int test_stuck_address(ulv *bufa, size_t count) {
                             "0x%08lx.\n",
                             (ul) (i * sizeof(ul)));
                 }
-                printf("Skipping to next test...\n");
+            }
+            result = -1;
+            if (!rampage_test_base && !page_failures) {
+                puts("Skipping to next test...");
                 fflush(stdout);
                 return -1;
             }
         }
+        if (result && !page_failures)
+            break;
     }
     out_test_end();
-    return 0;
+    return result;
+}
+
+int test_stuck_address(ulv *bufa, size_t count) {
+    return test_address_lines(bufa, count, 0, NULL);
+}
+
+int test_rampage_address_lines(ulv *bufa, size_t pages, size_t words_per_page,
+                               struct rampage_failure *page_failures) {
+    return test_address_lines(bufa, pages * words_per_page, words_per_page, page_failures);
 }
 
 int test_random_value(ulv *bufa, ulv *bufb, size_t count) {
@@ -504,22 +539,14 @@ int test_bitspread_comparison(ulv *bufa, ulv *bufb, size_t count) {
 
     out_test_start();
     for (j = 0; j < UL_LEN * 2; j++) {
+        unsigned int bit = j < UL_LEN ? j : UL_LEN * 2 - 1 - j;
+        ul pattern = (ONE << bit) | (ONE << ((bit + 2) % UL_LEN));
+
         p1 = (ulv *) bufa;
         p2 = (ulv *) bufb;
         out_test_setting(j);
         for (i = 0; i < count; i++) {
-            ul expected;
-            if (j < UL_LEN) { /* Walk it up. */
-                expected = (i % 2 == 0)
-                    ? (ONE << j) | (ONE << (j + 2))
-                    : UL_ONEBITS ^ ((ONE << j)
-                                    | (ONE << (j + 2)));
-            } else { /* Walk it back down. */
-                expected = (i % 2 == 0)
-                    ? (ONE << (UL_LEN * 2 - 1 - j)) | (ONE << (UL_LEN * 2 + 1 - j))
-                    : UL_ONEBITS ^ (ONE << (UL_LEN * 2 - 1 - j)
-                                    | (ONE << (UL_LEN * 2 + 1 - j)));
-            }
+            ul expected = (i % 2 == 0) ? pattern : ~pattern;
             rampage_expect(i, expected);
             *p1++ = *p2++ = expected;
         }
