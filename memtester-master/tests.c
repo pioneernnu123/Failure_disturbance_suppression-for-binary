@@ -40,6 +40,7 @@ FILE *rampage_result = NULL;
 ul *rampage_expected = NULL;
 size_t rampage_expected_count = 0;
 static int rampage_expected_valid = 0;
+static int rampage_injected = 0;
 
 static void rampage_expect(size_t index, ul value) {
     if (rampage_expected && index < rampage_expected_count) {
@@ -59,8 +60,7 @@ static size_t byte_offset(ulv *word, ul expected, ul observed) {
 }
 
 static void record_failure(ulv *word, char side, ul expected, ul observed) {
-    /* One finding can be the injected word. A second proves the page has
-     * another fault, so two records suffice for the isolation decision. */
+    /* Keep the first injected finding and any unexpected finding. */
     if (rampage_test_base &&
         rampage_failure_count < sizeof(rampage_failures) / sizeof(rampage_failures[0])) {
         rampage_failures[rampage_failure_count++] = (struct rampage_failure) {
@@ -81,14 +81,22 @@ static int injection_targets(ulv *bufa, size_t count, int kind) {
     return target < end && (target >= start || start - target < inject_pagesize);
 }
 
-/* In RAMpage mode, flip one word so all other differences are unexplained. */
 static int rampage_inject(ulv *bufa, size_t count, int kind) {
     size_t i;
 
     if (!injection_targets(bufa, count, kind))
         return 0;
-    if (rampage_test_base)
+    if (rampage_test_base) {
         inject_once = 0;
+        for (i = 0; rampage_expected_valid && i < count && i < rampage_expected_count; i++) {
+            ul before = bufa[i];
+
+            if (before != rampage_expected[i]) {
+                record_failure(&bufa[i], 'A', rampage_expected[i], before);
+                return -1;
+            }
+        }
+    }
     for (i = 0; i < count; i++) {
         uintptr_t address = (uintptr_t)&bufa[i];
         ul before, intended, observed;
@@ -96,16 +104,11 @@ static int rampage_inject(ulv *bufa, size_t count, int kind) {
         if (address < inject_bufa_start ||
             (address - inject_bufa_start) / inject_pagesize != (size_t)inject_page_rel)
             continue;
-        if (!rampage_test_base) {
+        if (!rampage_test_base || rampage_injected) {
             bufa[i] ^= 0x1;
             continue;
         }
         before = bufa[i];
-        if (rampage_expected_valid && i < rampage_expected_count &&
-            before != rampage_expected[i]) {
-            record_failure(&bufa[i], 'A', rampage_expected[i], before);
-            return -1;
-        }
         intended = before ^ 0x1;
         bufa[i] = intended;
         observed = bufa[i];
@@ -123,7 +126,7 @@ static int rampage_inject(ulv *bufa, size_t count, int kind) {
             record_failure(&bufa[i], 'A', intended, observed);
             return -1;
         }
-        return 0;
+        rampage_injected = 1;
     }
     return 0;
 }
@@ -131,6 +134,23 @@ static int rampage_inject(ulv *bufa, size_t count, int kind) {
 void rampage_reset_failure(void) {
     rampage_failure_count = 0;
     rampage_expected_valid = 0;
+    rampage_injected = 0;
+}
+
+static int check_a_word(ulv *word, ul expected, ul observed) {
+    ul expected_after = rampage_injected ? expected ^ 1UL : expected;
+
+    if (observed != expected_after) {
+        record_failure(word, 'A', expected_after, observed);
+        return -1;
+    }
+    if (rampage_injected &&
+        ((uintptr_t)word - rampage_test_base) / sizeof(ul) ==
+        rampage_injection_offset / sizeof(ul)) {
+        record_failure(word, 'A', expected, observed);
+        return -1;
+    }
+    return 0;
 }
 
 union {
@@ -158,11 +178,10 @@ int compare_regions(ulv *bufa, ulv *bufb, size_t count) {
 
         if (rampage_expected_valid && i < rampage_expected_count) {
             ul expected = rampage_expected[i];
+            int a_failed = check_a_word(p1, expected, a);
 
-            if (a == expected && b == expected)
+            if (!a_failed && b == expected)
                 continue;
-            if (a != expected)
-                record_failure(p1, 'A', expected, a);
             if (b != expected)
                 record_failure(p2, 'B', expected, b);
             if (!result)
@@ -198,8 +217,49 @@ static int compare_with_injection(ulv *bufa, ulv *bufb, size_t count, int kind) 
     return compare_regions(bufa, bufb, count);
 }
 
-static int test_address_lines(ulv *bufa, size_t count, size_t words_per_page,
-                              struct rampage_failure *page_failures) {
+int test_rampage_address_lines(ulv *buffer, size_t pages, size_t words_per_page,
+                              const char *page_mask, struct rampage_failure *failures) {
+    size_t parity, i, word_index;
+    int failed = 0;
+
+    /* Opposite write orders on even and odd words expose both pages of an alias
+     * before any page is checked and marked bad. */
+    for (parity = 0; parity < 2; parity++) {
+        for (i = 0; i < pages; i++) {
+            size_t page = parity ? pages - 1 - i : i;
+            ulv *start = buffer + page * words_per_page;
+
+            if (page_mask && page_mask[page] == '0')
+                continue;
+            for (word_index = parity; word_index < words_per_page; word_index += 2) {
+                ulv *word = start + word_index;
+                *word = (ul)word;
+            }
+        }
+    }
+    for (i = 0; i < pages; i++) {
+        ulv *start = buffer + i * words_per_page;
+
+        if (page_mask && page_mask[i] == '0')
+            continue;
+        for (word_index = 0; word_index < words_per_page; word_index++) {
+            ulv *word = start + word_index;
+            ul expected = (ul)word;
+            ul observed = *word;
+
+            if (observed == expected)
+                continue;
+            failures[i] = (struct rampage_failure) {
+                byte_offset(word, expected, observed), 'A', expected, observed
+            };
+            failed = 1;
+            break;
+        }
+    }
+    return failed;
+}
+
+int test_stuck_address(ulv *bufa, size_t count) {
     unsigned int j;
     size_t i;
     int result = 0;
@@ -207,17 +267,14 @@ static int test_address_lines(ulv *bufa, size_t count, size_t words_per_page,
     out_test_start();
     for (j = 0; j < 16; j++) {
         out_test_setting(j);
-        /* Both write orders expose both ends of a cross-page alias. */
         for (i = 0; i < count; i++) {
-            size_t index = (page_failures && (j & 2)) ? count - 1 - i : i;
-            ulv *word = bufa + index;
-            ul expected = ((j + index) % 2) == 0 ? (ul)word : ~((ul)word);
+            ulv *word = bufa + i;
+            ul expected = ((j + i) % 2) == 0 ? (ul)word : ~((ul)word);
 
-            if (!page_failures)
-                rampage_expect(index, expected);
+            rampage_expect(i, expected);
             *word = expected;
         }
-        if (!page_failures && rampage_inject(bufa, count, 1))
+        if (rampage_inject(bufa, count, 1))
             return -1;
         out_test_testing(j);
         for (i = 0; i < count; i++) {
@@ -225,18 +282,8 @@ static int test_address_lines(ulv *bufa, size_t count, size_t words_per_page,
             ul expected = ((j + i) % 2) == 0 ? (ul)word : ~((ul)word);
             ul observed = *word;
 
-            if (observed == expected)
+            if (!check_a_word(word, expected, observed))
                 continue;
-            if (page_failures) {
-                struct rampage_failure *failure = &page_failures[i / words_per_page];
-
-                if (!failure->side)
-                    *failure = (struct rampage_failure) {
-                        byte_offset(word, expected, observed), 'A', expected, observed
-                    };
-            } else {
-                record_failure(word, 'A', expected, observed);
-            }
             if (!result) {
                 if (use_phys) {
                     off_t physaddr = physaddrbase + (i * sizeof(ul));
@@ -252,26 +299,17 @@ static int test_address_lines(ulv *bufa, size_t count, size_t words_per_page,
                 }
             }
             result = -1;
-            if (!rampage_test_base && !page_failures) {
+            if (!rampage_test_base) {
                 puts("Skipping to next test...");
                 fflush(stdout);
                 return -1;
             }
         }
-        if (result && !page_failures)
+        if (result)
             break;
     }
     out_test_end();
     return result;
-}
-
-int test_stuck_address(ulv *bufa, size_t count) {
-    return test_address_lines(bufa, count, 0, NULL);
-}
-
-int test_rampage_address_lines(ulv *bufa, size_t pages, size_t words_per_page,
-                               struct rampage_failure *page_failures) {
-    return test_address_lines(bufa, pages * words_per_page, words_per_page, page_failures);
 }
 
 int test_random_value(ulv *bufa, ulv *bufb, size_t count) {

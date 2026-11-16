@@ -19,9 +19,11 @@ sys.path.insert(0, str(USERSPACE))
 import physmem
 import main as interactive
 import run_memory_test
+from frame import FrameStatus
 from injection_state import write_injection_type
 from physmem import physmem as protocol
 from scheduling.slow.slow_scheduler import RoundResult, SlowScheduler
+from status import FileBasedConfiguration
 from tester.memtester_wrapper import (Failure, Injection, MemtesterResult,
                                       MemtesterWrapper)
 
@@ -29,37 +31,38 @@ from tester.memtester_wrapper import (Failure, Injection, MemtesterResult,
 class ProtocolTests(unittest.TestCase):
     def test_ioctl_layout_is_fixed_width(self):
         structures = (protocol.Allocate, protocol.PageInfo, protocol.Report,
-                      protocol.Status, protocol.Entry, protocol.Restore)
+                      protocol.Status, protocol.Entry, protocol.Restore, protocol.Finish)
         self.assertEqual([ctypes.sizeof(item) for item in structures],
-                         [32, 32, 40, 56, 72, 32])
+                         [32, 32, 40, 56, 72, 32, 24])
         self.assertEqual(protocol.IOCTL_REPORT, 0xC0284B02)
         self.assertEqual(protocol.IOCTL_ENTRY, 0xC0484B04)
+        self.assertEqual(protocol.IOCTL_FINISH, 0xC0184B06)
 
     def test_result_requires_session_and_real_offset(self):
         failures, injection, error = MemtesterWrapper._parse_result(
-            "RAMPAGE_RESULT_V3 42 8\nBAD 2 20480 A 100 101\n"
-            "INJECT 2 5 20480 100 101\nEND CHECKED\n", 42, 8, 4096)
+            "RAMPAGE_RESULT_V4 42 8\nPRECHECK 5\nINJECT 2 5 20480 100 101\n"
+            "BAD 2 20480 A 100 101\nEND CHECKED\n", 42, 8, 4096)
         self.assertIsNone(error)
         self.assertEqual(failures, (Failure(2, 20480, "A", 100, 101),))
         self.assertEqual(injection, Injection(2, 5, 20480, 100, 101))
         _, ineffective, error = MemtesterWrapper._parse_result(
-            "RAMPAGE_RESULT_V3 42 8\nINJECT 2 5 20480 100 100\nEND CHECKED\n",
+            "RAMPAGE_RESULT_V4 42 8\nPRECHECK 5\nINJECT 2 5 20480 100 100\nEND CHECKED\n",
             42, 8, 4096)
         self.assertFalse(ineffective.effective)
         self.assertIsNone(error)
         failures, _, error = MemtesterWrapper._parse_result(
-            "RAMPAGE_RESULT_V3 99 8\nINJECT NONE\nEND CHECKED\n", 42, 8, 4096)
+            "RAMPAGE_RESULT_V4 99 8\nINJECT NONE\nEND CHECKED\n", 42, 8, 4096)
         self.assertFalse(failures)
         self.assertIn("matching session header", error)
         failures, _, error = MemtesterWrapper._parse_result(
-            "RAMPAGE_RESULT_V3 42 8\nBAD 2 32768 A 100 101\nINJECT NONE\nEND CHECKED\n",
+            "RAMPAGE_RESULT_V4 42 8\nBAD 2 32768 A 100 101\nINJECT NONE\nEND CHECKED\n",
             42, 8, 4096)
         self.assertFalse(failures)
         self.assertIn("invalid memtester result", error)
 
     def test_incomplete_output_preserves_flushed_evidence(self):
         failures, injection, error = MemtesterWrapper._parse_result(
-            "RAMPAGE_RESULT_V3 42 8\nINJECT 2 5 20480 100 101\n"
+            "RAMPAGE_RESULT_V4 42 8\nPRECHECK 5\nINJECT 2 5 20480 100 101\n"
             "BAD 2 20480 A 100 101\nBAD 2 2048", 42, 8, 4096)
         self.assertEqual(failures, (Failure(2, 20480, "A", 100, 101),))
         self.assertTrue(injection.effective)
@@ -68,10 +71,18 @@ class ProtocolTests(unittest.TestCase):
     def test_legacy_result_preserves_evidence_without_confirming_verification(self):
         failures, injection, error = MemtesterWrapper._parse_result(
             "RAMPAGE_RESULT_V3 42 8\nINJECT 2 5 20480 100 101\n"
-            "BAD 2 20480 A 100 101\nEND\n", 42, 8, 4096)
+            "BAD 2 20480 A 100 101\nEND CHECKED\n", 42, 8, 4096)
         self.assertEqual(failures, (Failure(2, 20480, "A", 100, 101),))
         self.assertTrue(injection.effective)
         self.assertIn("rebuild memtester", error)
+
+    def test_injection_without_target_precheck_is_unconfirmed(self):
+        failures, injection, error = MemtesterWrapper._parse_result(
+            "RAMPAGE_RESULT_V4 42 8\nPRECHECK 4\nINJECT 2 5 20480 100 101\n"
+            "BAD 2 20480 A 100 101\nEND CHECKED\n", 42, 8, 4096)
+        self.assertEqual(failures, (Failure(2, 20480, "A", 100, 101),))
+        self.assertTrue(injection.effective)
+        self.assertIn("no matching target precheck", error)
 
     def test_wrapper_passes_session_descriptor_and_distinguishes_failure(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -90,8 +101,8 @@ class ProtocolTests(unittest.TestCase):
                     self.assertTrue(start_new_session)
                     seen.append((command, pass_fds))
                     result_fd = int(command[command.index("-R") + 1])
-                    os.write(result_fd, b"RAMPAGE_RESULT_V3 42 8\n"
-                               b"BAD 2 20480 A 100 101\nINJECT 2 5 20480 100 101\nEND CHECKED\n")
+                    os.write(result_fd, b"RAMPAGE_RESULT_V4 42 8\nPRECHECK 5\n"
+                               b"INJECT 2 5 20480 100 101\nBAD 2 20480 A 100 101\nEND CHECKED\n")
                     return types.SimpleNamespace(returncode=4)
 
                 with mock.patch("tester.memtester_wrapper.subprocess.run", side_effect=fake_run):
@@ -124,9 +135,11 @@ class ProtocolTests(unittest.TestCase):
                 kinds.append(kind)
                 result_fd = int(command[command.index("-R") + 1])
                 self.assertEqual("-i" in command, bool(kind))
-                report = "RAMPAGE_RESULT_V3 42 8\n"
+                self.assertEqual(command[command.index("-P") + 1],
+                                 "10000101" if kind else "10000001")
+                report = "RAMPAGE_RESULT_V4 42 8\n"
                 if kind:
-                    report += f"INJECT {kind} 5 {offset} 100 101\nBAD {kind} {offset} A 100 101\n"
+                    report += f"PRECHECK 5\nINJECT {kind} 5 {offset} 100 101\nBAD {kind} {offset} A 100 101\n"
                 else:
                     report += "INJECT NONE\n"
                 os.write(result_fd, (report + "END CHECKED\n").encode())
@@ -136,11 +149,35 @@ class ProtocolTests(unittest.TestCase):
                 for update in (None, 1, None, 7, 0):
                     if update is not None:
                         write_injection_type(update, state_path)
-                    self.assertIsNone(wrapper.test(pages).execution_error)
+                    self.assertIsNone(wrapper.test(pages, (0, 7)).execution_error)
+                self.assertEqual(wrapper.test(pages, ()).tested_indices, ())
             self.assertEqual(kinds, [0, 1, 1, 7, 0])
 
 
 class SchedulerTests(unittest.TestCase):
+    def test_existing_pfn_status_file_controls_retest_and_keeps_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "status"
+            with FileBasedConfiguration(path, 10, FrameStatus).open() as old:
+                old[5].last_successful_test = 99_900
+                old[6].last_successful_test = 99_900
+                old[6].num_errors = 1
+            with FileBasedConfiguration(path, 0, FrameStatus).open_sparse() as history:
+                scheduler = SlowScheduler(frame_status=history, retest_time=60)
+                pfns = (5, 6, 100_000)
+                self.assertEqual(scheduler._eligible_indices(pfns, 100_000), (1, 2))
+                self.assertEqual(scheduler._eligible_indices(pfns, 106_000), (0, 1, 2))
+                failure = Failure(7, physmem.PAGE_SIZE, "A", 100, 101)
+                result = MemtesterResult((failure,), None, 4, tested_indices=(1, 2))
+                with mock.patch.object(scheduler.timestamping, "timestamp", return_value=100_000):
+                    scheduler.record_frame_results(
+                        RoundResult(99, 1, pfns, result, (), (), 0, 0))
+                self.assertEqual(history.read_record(5).last_successful_test, 99_900)
+                self.assertEqual(history.read_record(6).num_errors, 2)
+                self.assertEqual(history.read_record(6).last_failed_test, 100_000)
+            with FileBasedConfiguration(path, 0, FrameStatus).open_sparse() as reopened:
+                self.assertEqual(reopened.read_record(100_000).last_successful_test, 100_000)
+
     def test_simulated_classification_requires_correlated_evidence(self):
         injection = Injection(2, 5, 20480, 100, 101)
         self.assertTrue(SlowScheduler._is_simulated(Failure(2, 20480, "A", 100, 101), injection))
@@ -185,13 +222,17 @@ class SchedulerTests(unittest.TestCase):
                 state["reports"].append((offset, kind, origin))
                 return types.SimpleNamespace(state=physmem.PAGE_PENDING)
 
+            def finish(self):
+                held = len(state["reports"])
+                return types.SimpleNamespace(released=self.page_count - held, held=held)
+
             def entries(self, run_id):
                 if not state["session_closed"]:
                     raise AssertionError("queried isolation before closing the test session")
                 return iter(state["entries"])
 
             def status(self):
-                return types.SimpleNamespace(total_pages=len(state["entries"]))
+                return types.SimpleNamespace(total_pages=1 if state["session_closed"] else 0)
 
         offset = 5 * physmem.PAGE_SIZE
         injected = Failure(2, offset, "A", 100, 101)
@@ -200,17 +241,35 @@ class SchedulerTests(unittest.TestCase):
         for findings, error, expected in (
                 ((injected,), None, (offset, 2, physmem.ORIGIN_SIMULATED)),
                 ((injected, unexplained), None, (offset + 8, 2, physmem.ORIGIN_UNKNOWN)),
-                ((injected,), "memtester interrupted", (offset, 2, physmem.ORIGIN_UNKNOWN))):
+                ((injected,), "memtester interrupted", (offset, 2, physmem.ORIGIN_UNKNOWN)),
+                ((), None, None)):
             with self.subTest(findings=findings, error=error):
                 state.update(session_closed=False, reports=[], entries=[])
                 tester = types.SimpleNamespace(
-                    test=lambda pages: MemtesterResult(findings, injection, 4, error))
+                    test=lambda pages: MemtesterResult(findings, injection if findings else None,
+                                                       4 if findings else 0, error))
                 with mock.patch.object(physmem, "Physmem", Device):
                     outcome = SlowScheduler("/dev/fake").run_round(99, 8, tester)
                 self.assertEqual(outcome.interception_success,
-                                 expected[2] == physmem.ORIGIN_SIMULATED)
+                                 expected is not None and expected[2] == physmem.ORIGIN_SIMULATED)
                 self.assertEqual(outcome.probe_pfns, (200,))
-                self.assertEqual(state["reports"], [expected])
+                self.assertEqual(state["reports"], [expected] if expected else [])
+                self.assertEqual(outcome.session_pages_released, 8 - bool(expected))
+                self.assertEqual(outcome.session_pages_held, bool(expected))
+                self.assertEqual(outcome.isolation_errors, ())
+                self.assertNotEqual(outcome.global_pages_before, outcome.global_pages_after)
+
+    def test_build_info_works_in_source_tree_and_binary_distribution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for subdir in ("module", "userspace"):
+                (root / subdir).mkdir()
+            source = root / "module" / "build-info.txt"
+            source.write_text("source module build\n")
+            with mock.patch.object(run_memory_test, "__file__", str(root / "userspace" / "run_memory_test.py")):
+                self.assertEqual(run_memory_test.read_build_info(), "source module build\n")
+                (root / "userspace" / "build-info.txt").write_text("packaged module build\n")
+                self.assertEqual(run_memory_test.read_build_info(), "packaged module build\n")
 
     def test_effective_but_unconfirmed_injection_counts_in_case_rate(self):
         offset = 5 * physmem.PAGE_SIZE
@@ -241,13 +300,15 @@ class SchedulerTests(unittest.TestCase):
             self.assertIsNone(tester.binary)
             counts.append(page_count)
             tester.report_injection(0)
-            if len(counts) == 3:
+            if len(counts) == 5:
                 signal.raise_signal(signal.SIGINT)
             held = (types.SimpleNamespace(index=5, pfn=0x1234, byte_offset=20480,
                                           error_type=1, origin=physmem.ORIGIN_UNKNOWN,
                                           state=physmem.PAGE_HELD, map_refs=0, module_refs=1,
                                           page_refcount=1, last_error=0),)
-            return RoundResult(run_id, len(counts), (), MemtesterResult((), None, 0),
+            first_pfn = (0, 0, 8, 14, 20)[len(counts) - 1]
+            return RoundResult(run_id, len(counts), tuple(range(first_pfn, first_pfn + page_count)),
+                               MemtesterResult((), None, 0),
                                held if len(counts) == 2 else (), (), 0, 0)
 
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(output), mock.patch.object(
@@ -259,19 +320,23 @@ class SchedulerTests(unittest.TestCase):
                 "-t", "memtester", "--memtester-args=-i 5",
                 "--memtester-inject-type=0", "-a", "slow",
                 "--frames-per-check=8", "--scan-mode=local",
-                f"--max-memory={14 * physmem.PAGE_SIZE}B",
+                f"--max-memory={20 * physmem.PAGE_SIZE}B",
+                "-s", str(Path(directory) / "status"),
                 "--logfile", str(log_path), "--memtester-inject-file", str(state_path)])
-            records = [json.loads(line) for line in log_path.read_text().splitlines()]
+            lines = log_path.read_text().splitlines()
+            records = [json.loads(line) for line in lines if line.startswith("{")]
         self.assertEqual(code, 0)
-        self.assertEqual(counts, [8, 6, 8])
+        self.assertEqual(counts, [8, 6, 6, 6, 8])
         self.assertEqual(records[0]["event"], "start")
-        self.assertEqual([record["pass"] for record in records[1:-1]], [1, 1, 2])
+        self.assertEqual([record["pass"] for record in records[1:-1]], [1, 1, 1, 1, 2])
         self.assertEqual(records[-1]["event"], "stop")
         self.assertEqual(records[-1]["reason"], "interrupted")
         self.assertEqual(len({record["run_id"] for record in records}), 1)
+        self.assertIn("---log reset---", lines)
+        self.assertTrue(any(line.startswith("pass: 26 frames ") for line in lines))
         console = output.getvalue()
-        self.assertEqual(console.count("当前错误类型：None"), 3)
-        self.assertIn("Tested 14 frames in", console)
+        self.assertEqual(console.count("当前错误类型：None"), 5)
+        self.assertIn("Tested 26 frames in", console)
         self.assertIn("[WARNING] bad frame at pfn 00001234 (no serdev)", console)
         self.assertEqual(console.count("RUN_ID="), 1)
         self.assertNotIn("session=", console)

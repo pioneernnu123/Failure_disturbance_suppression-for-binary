@@ -1,6 +1,7 @@
 """Version 3 of /dev/phys_mem for session-owned test pages."""
 
 import ctypes
+import errno
 import mmap
 import os
 
@@ -66,6 +67,11 @@ class Restore(ctypes.Structure):
                 ("skipped", ctypes.c_uint32)]
 
 
+class Finish(ctypes.Structure):
+    _fields_ = [("version", ctypes.c_uint32), ("reserved", ctypes.c_uint32),
+                ("session_id", ctypes.c_uint64), ("released", ctypes.c_uint32),
+                ("held", ctypes.c_uint32)]
+
 def _iowr(number, structure):
     return 0xC0000000 | (ctypes.sizeof(structure) << 16) | (ord("K") << 8) | number
 
@@ -76,6 +82,7 @@ IOCTL_REPORT = _iowr(2, Report)
 IOCTL_STATUS = _iowr(3, Status)
 IOCTL_ENTRY = _iowr(4, Entry)
 IOCTL_RESTORE = _iowr(5, Restore)
+IOCTL_FINISH = _iowr(6, Finish)
 
 
 def _ioctl(fd, command, value):
@@ -147,6 +154,16 @@ class Physmem:
         return MmapWrapper(mmap.mmap(self.dev(), self.page_count * PAGE_SIZE,
                                     mmap.MAP_SHARED,
                                     mmap.PROT_READ | mmap.PROT_WRITE))
+
+    def finish(self):
+        if self.session_id is None:
+            raise RuntimeError("allocate pages before finishing the session")
+        try:
+            return _ioctl(self.dev(), IOCTL_FINISH, Finish(PROTOCOL_VERSION, 0, self.session_id))
+        except OSError as exc:
+            if exc.errno == errno.ENOTTY:
+                raise OSError(exc.errno, "rebuild and load phys_mem with session release support") from exc
+            raise
 
     def status(self, run_id=0):
         return _ioctl(self.dev(), IOCTL_STATUS, Status(PROTOCOL_VERSION, 0, run_id))

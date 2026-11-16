@@ -2,10 +2,13 @@ obj-m := phys_mem.o
 phys_mem-y := main.o file_operations.o mmap_phys.o
 ccflags-y += -I$(src)/include
 
-KDIR ?= /lib/modules/$(shell uname -r)/build
+VERSION ?= $(shell uname -r)
+KDIR ?= /lib/modules/$(VERSION)/build
 
-.PHONY: all clean
-all:
+.PHONY: all module clean
+all: module
+
+module:
 	@test -s "$(KDIR)/Module.symvers" || { \
 	    echo "Missing kernel Module.symvers in $(KDIR). Set KDIR to a compatible kernel build directory." >&2; \
 	    exit 1; \

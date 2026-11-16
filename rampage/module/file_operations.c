@@ -44,7 +44,7 @@ static int phys_mem_open(struct inode *inode, struct file *file)
 }
 
 /* Called under phys_mem_lock, after the last VMA has closed. */
-void phys_mem_release_session(struct phys_mem_session *session)
+static void phys_mem_release_session(struct phys_mem_session *session)
 {
 	unsigned int i;
 
@@ -58,6 +58,7 @@ void phys_mem_release_session(struct phys_mem_session *session)
 		if (test->state != PHYS_MEM_PAGE_PENDING) {
 			__free_page(test->page);
 			phys_mem_total_pages--;
+			session->released_pages++;
 			continue;
 		}
 		/* The live-page reservation guarantees a slot for this report. */
@@ -80,6 +81,7 @@ void phys_mem_release_session(struct phys_mem_session *session)
 		__module_get(THIS_MODULE); /* Refuse normal rmmod while held. */
 		phys_mem_pending--;
 		phys_mem_held++;
+		session->held_pages++;
 		pr_info("phys_mem: module-held run=%llu session=%llu index=%u pfn=%#llx origin=%u\n",
 			(unsigned long long)entry->run_id,
 			(unsigned long long)entry->session_id, i,
@@ -118,7 +120,7 @@ static long phys_mem_allocate_ioctl(struct phys_mem_session *session,
 		return -EINVAL;
 
 	mutex_lock(&phys_mem_lock);
-	if (session->pages) {
+	if (session->pages || session->finished) {
 		ret = -EBUSY;
 		goto out;
 	}
@@ -153,6 +155,7 @@ static long phys_mem_allocate_ioctl(struct phys_mem_session *session,
 	mutex_lock(&phys_mem_lock);
 	if (ret) {
 		phys_mem_release_session(session);
+		session->released_pages = 0;
 		session->run_id = 0;
 	}
 	session->allocating = false;
@@ -240,6 +243,49 @@ out:
 	return copy_to_user(arg, &req, sizeof(req)) ? -EFAULT : 0;
 }
 
+static long phys_mem_finish_ioctl(struct phys_mem_session *session,
+				  void __user *arg)
+{
+	struct phys_mem_finish req;
+	unsigned int i;
+	int ret = 0;
+
+	if (copy_from_user(&req, arg, sizeof(req)))
+		return -EFAULT;
+	if (req.version != PHYS_MEM_PROTOCOL_VERSION || req.reserved ||
+	    req.session_id != session->session_id)
+		return -EINVAL;
+	mutex_lock(&phys_mem_lock);
+	if (!session->pages && !session->finished) {
+		ret = -EINVAL;
+		goto out;
+	}
+	if (session->allocating || session->map_refs) {
+		ret = -EBUSY;
+		goto out;
+	}
+	for (i = 0; i < session->num_pages; i++) {
+		struct phys_mem_test_page *test = &session->pages[i];
+
+		if (page_mapped(test->page) ||
+		    (test->state == PHYS_MEM_PAGE_ACTIVE && page_count(test->page) != 1)) {
+			ret = -EBUSY;
+			goto out;
+		}
+	}
+	if (!session->finished) {
+		phys_mem_release_session(session);
+		session->finished = true;
+	}
+	req.released = session->released_pages;
+	req.held = session->held_pages;
+out:
+	mutex_unlock(&phys_mem_lock);
+	if (ret)
+		return ret;
+	return copy_to_user(arg, &req, sizeof(req)) ? -EFAULT : 0;
+}
+
 static long phys_mem_status_ioctl(void __user *arg)
 {
 	struct phys_mem_status req;
@@ -268,7 +314,7 @@ static long phys_mem_status_ioctl(void __user *arg)
 		}
 	}
 	list_for_each_entry(session, &phys_mem_sessions, link) {
-		if (!session->pages ||
+		if (!session->run_id ||
 		    (req.run_id && session->run_id != req.run_id))
 			continue;
 		req.active_sessions++;
@@ -338,7 +384,7 @@ static long phys_mem_restore_ioctl(void __user *arg)
 		return -EINVAL;
 	mutex_lock(&phys_mem_lock);
 	list_for_each_entry(session, &phys_mem_sessions, link) {
-		if (session->pages && session->run_id == req.run_id) {
+		if (session->run_id == req.run_id) {
 			mutex_unlock(&phys_mem_lock);
 			return -EBUSY;
 		}
@@ -395,6 +441,8 @@ static long phys_mem_ioctl(struct file *file, unsigned int cmd,
 		return phys_mem_entry_ioctl(user_arg);
 	case PHYS_MEM_IOC_RESTORE:
 		return phys_mem_restore_ioctl(user_arg);
+	case PHYS_MEM_IOC_FINISH:
+		return phys_mem_finish_ioctl(session, user_arg);
 	default:
 		return -ENOTTY;
 	}

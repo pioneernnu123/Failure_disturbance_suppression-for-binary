@@ -25,6 +25,10 @@ THE SOFTWARE.
 import mmap
 import kpage
 import struct
+from contextlib import contextmanager
+import fcntl
+import os
+import stat
 
 from ctypes import *
 import sys
@@ -90,6 +94,36 @@ class FileBasedConfiguration():
 
         self.map = mmap.mmap(fileno, int(size))
         return self
+
+    def open_sparse(self):
+        """Open the same PFN-indexed file without truncating or mapping it."""
+        self.close()
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+                     0o600)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError("the PFN status file must be a regular file")
+            self.file = os.fdopen(fd, 'r+b', buffering=0)
+        except (OSError, ValueError):
+            os.close(fd)
+            raise
+        return self
+
+    @contextmanager
+    def locked_records(self):
+        fcntl.flock(self.file, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(self.file, fcntl.LOCK_UN)
+
+    def read_record(self, pfn):
+        data = os.pread(self.file.fileno(), self.record_size, pfn * self.record_size)
+        return self.instance_clazz.from_buffer_copy(data.ljust(self.record_size, b'\0'))
+
+    def write_record(self, pfn, record):
+        if os.pwrite(self.file.fileno(), bytes(record), pfn * self.record_size) != self.record_size:
+            raise OSError("incomplete write to the PFN status file")
 
     def close(self):
         if (self.map):

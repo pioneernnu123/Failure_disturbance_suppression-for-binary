@@ -31,10 +31,11 @@ def serialize_round(result, case_id, attempt, injection_type):
         "session_id": result.session_id,
         "injection_type": injection_type,
         "pfns": list(result.pfns),
+        "tested_pfns": list(result.tested_pfns),
         "injection": (asdict(result.memtester.injection)
                       if result.memtester.injection else None),
         "failures": [asdict(item) for item in result.memtester.failures],
-        "isolated": [{"index": item.index, "pfn": item.pfn,
+        "isolated": [{"disposition": "模块扣留", "index": item.index, "pfn": item.pfn,
                       "byte_offset": item.byte_offset,
                       "error_type": item.error_type, "origin": item.origin,
                       "state": item.state, "map_refs": item.map_refs,
@@ -45,6 +46,8 @@ def serialize_round(result, case_id, attempt, injection_type):
         "probe_pfns": list(result.probe_pfns),
         "global_pages_before": result.global_pages_before,
         "global_pages_after": result.global_pages_after,
+        "session_pages_released": result.session_pages_released,
+        "session_pages_held": result.session_pages_held,
         "memtester_exit_code": result.memtester.returncode,
         "execution_error": result.memtester.execution_error,
         "isolation_errors": list(result.isolation_errors),
@@ -52,6 +55,14 @@ def serialize_round(result, case_id, attempt, injection_type):
         "effective": result.injection_effective,
         "intercepted": result.interception_success,
     }
+
+
+def read_build_info():
+    directory = Path(__file__).resolve().parent
+    for path in (directory / "build-info.txt", directory.parent / "module" / "build-info.txt"):
+        if path.is_file():
+            return path.read_text(encoding="utf-8")
+    return "unavailable"
 
 
 def main(argv=None):
@@ -86,9 +97,7 @@ def main(argv=None):
                "module_version": (Path("/sys/module/phys_mem/version").read_text().strip()
                                   if Path("/sys/module/phys_mem/version").exists()
                                   else "unavailable"),
-               "build_info": (Path(__file__).with_name("build-info.txt").read_text()
-                              if Path(__file__).with_name("build-info.txt").exists()
-                              else "unavailable"),
+               "build_info": read_build_info(),
                "memtester": memtester_wrapper.MEMTESTER_BIN,
                "cases": {}, "rounds": []}
 

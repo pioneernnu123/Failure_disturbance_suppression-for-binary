@@ -1,4 +1,8 @@
-# RAMpage 内存失效扰动抑制
+# RISC-V 内存失效扰动抑制
+
+This repository contains the RAMpage online memory tester for Linux, which we
+developed on the basis of
+[Jens Neuhalfen's memtester](https://github.com/neuhalje/kernel-memtest).
 
 当前代码使用外部模块在目标 RISC-V Linux 内核上分配测试页，memtester 直接测试
 设备会话映射的页面，驱动在映射关闭后把报告异常的页转入模块级隔离表。
@@ -12,16 +16,23 @@
 调用的注入编号。`run_memory_test.py` 自动运行大纲的四项验收。两种运行方式
 都会生成供 `phys_memctl` 查询和恢复的批次号。
 
-RAMpage 的早期论文和原型背景：
+## Publications
+
+A detailed description, and measurements on both effectiveness and efficiency,
+can be found in the following two publications:
 
 * H. Schirmeier, J. Neuhalfen, I. Korb, O. Spinczyk, and M. Engel.
   [RAMpage: Graceful degradation management for memory errors in commodity
   Linux servers](https://ess.cs.tu-dortmund.de/~hsc/Publications/files/PRDC-FAST-2011-Schirmeier.pdf).
   In *Proceedings of the 17th IEEE Pacific Rim International Symposium on
   Dependable Computing (PRDC '11)*, pages 89-98, Pasadena, CA, USA, Dec. 2011.
+  IEEE Computer Society Press.
 
 * H. Schirmeier, I. Korb, O. Spinczyk, and M. Engel. [Efficient online memory
   error assessment and circumvention for Linux with
   RAMpage](https://ess.cs.tu-dortmund.de/~hsc/Publications/files/IJCCBS-2013-Schirmeier.pdf).
   *International Journal of Critical Computer-Based Systems*, 4(3):227-247,
-  2013.
+  2013.  Special Issue on PRDC 2011 Dependable Architecture and Analysis.
+
+The code in this repository is licensed under the GNU General Public License
+(GPL), Version 2.

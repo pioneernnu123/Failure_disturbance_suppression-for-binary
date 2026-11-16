@@ -89,11 +89,20 @@ struct phys_mem_restore {
 	__u32 skipped;
 };
 
+struct phys_mem_finish {
+	__u32 version;
+	__u32 reserved;
+	__u64 session_id;
+	__u32 released;    /* output: session pages returned to the allocator */
+	__u32 held;        /* output: session pages moved to the isolation table */
+};
+
 #define PHYS_MEM_IOC_ALLOCATE _IOWR(PHYS_MEM_IOC_MAGIC, 0, struct phys_mem_allocate)
 #define PHYS_MEM_IOC_PAGE     _IOWR(PHYS_MEM_IOC_MAGIC, 1, struct phys_mem_page_info)
 #define PHYS_MEM_IOC_REPORT   _IOWR(PHYS_MEM_IOC_MAGIC, 2, struct phys_mem_report)
 #define PHYS_MEM_IOC_STATUS   _IOWR(PHYS_MEM_IOC_MAGIC, 3, struct phys_mem_status)
 #define PHYS_MEM_IOC_ENTRY    _IOWR(PHYS_MEM_IOC_MAGIC, 4, struct phys_mem_entry)
 #define PHYS_MEM_IOC_RESTORE  _IOWR(PHYS_MEM_IOC_MAGIC, 5, struct phys_mem_restore)
+#define PHYS_MEM_IOC_FINISH   _IOWR(PHYS_MEM_IOC_MAGIC, 6, struct phys_mem_finish)
 
 #endif

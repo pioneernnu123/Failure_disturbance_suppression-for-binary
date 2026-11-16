@@ -4,7 +4,7 @@ import os
 import sys
 import time
 
-MIN_AVAILABLE_MEM_MB = 1024
+MIN_AVAILABLE_MEM_MB = 1024  
 
 MAX_MEM_PERCENT = 85.0
 

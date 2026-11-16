@@ -24,7 +24,7 @@ extern int inject_kind;
 extern int inject_once;
 extern int compare_regions(ulv *bufa, ulv *bufb, size_t count);
 
-static int test_cross_page_alias(void)
+static int test_address_alias(void)
 {
     size_t page_size = sysconf(_SC_PAGESIZE);
     struct rampage_failure failures[3] = {0};
@@ -34,23 +34,24 @@ static int test_cross_page_alias(void)
 
     if (!file)
         return 1;
-    if (ftruncate(fileno(file), 3 * page_size) != 0)
+    if (ftruncate(fileno(file), 3 * page_size))
         goto out;
     mapping = mmap(NULL, 3 * page_size, PROT_READ | PROT_WRITE, MAP_SHARED, fileno(file), 0);
     if (mapping == MAP_FAILED)
         goto out;
 
     rampage_test_base = (uintptr_t)mapping;
-    if (test_rampage_address_lines((ulv *)mapping, 3, page_size / sizeof(ul), failures))
+    if (test_rampage_address_lines((ulv *)mapping, 3, page_size / sizeof(ul), NULL, failures))
         goto out;
     if (mmap(mapping + 2 * page_size, page_size, PROT_READ | PROT_WRITE,
              MAP_SHARED | MAP_FIXED, fileno(file), 0) == MAP_FAILED)
         goto out;
-    if (test_rampage_address_lines((ulv *)mapping, 3, page_size / sizeof(ul), failures) == -1 &&
-        failures[0].side == 'A' && failures[0].offset < page_size && !failures[1].side &&
+    memset(mapping + page_size, 0, page_size);
+    if (test_rampage_address_lines((ulv *)mapping, 3, page_size / sizeof(ul), "101", failures) &&
+        failures[0].side == 'A' && failures[0].offset < page_size &&
+        !failures[1].side && *(ul *)(mapping + page_size) == 0 &&
         failures[2].side == 'A' && failures[2].offset / page_size == 2)
         status = 0;
-
 out:
     rampage_test_base = 0;
     if (mapping != MAP_FAILED)
@@ -110,9 +111,9 @@ int main(void)
             free(rampage_expected);
             return 1;
         }
-        for (size_t i = 1; i < (kind == 1 ? 2 * count : count); i++) {
-            if (a[i] != rampage_expected[i]) {
-                fprintf(stderr, "kind %d modified a second word\n", kind);
+        for (size_t i = 0; i < (kind == 1 ? 2 * count : count); i++) {
+            if (a[i] != (rampage_expected[i] ^ 1UL)) {
+                fprintf(stderr, "kind %d failed to flip the low bit at word %zu\n", kind, i);
                 return 1;
             }
         }
@@ -127,6 +128,16 @@ int main(void)
                 rampage_failures[1].side != 'B' ||
                 rampage_failures[1].offset / sizeof(ul) != last_word_offset / sizeof(ul)) {
                 fprintf(stderr, "a later fault was masked by the injection\n");
+                return 1;
+            }
+            b[count - 1] ^= 1;
+            a[count - 1] ^= 1;
+            rampage_failure_count = 0;
+            if (compare_regions(a, b, count) != -1 || rampage_failure_count != 2 ||
+                rampage_failures[1].side != 'A' ||
+                rampage_failures[1].offset / sizeof(ul) !=
+                (last_word_offset - page_size / 2) / sizeof(ul)) {
+                fprintf(stderr, "a failed flip on the A side was masked\n");
                 return 1;
             }
         }
@@ -157,10 +168,10 @@ int main(void)
     }
     free(rampage_expected);
     free(buffer);
-    if (test_cross_page_alias()) {
-        fprintf(stderr, "failed to identify both pages of a cross-page alias\n");
+    if (test_address_alias()) {
+        fprintf(stderr, "batch address check missed a cross-page alias\n");
         return 1;
     }
-    puts("injection offsets, mixed faults, and cross-page alias checks passed");
+    puts("injection offsets, mixed faults and cross-page alias checks passed");
     return 0;
 }

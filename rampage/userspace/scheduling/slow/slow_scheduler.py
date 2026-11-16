@@ -5,6 +5,7 @@ import errno
 from typing import Optional
 
 import physmem
+from status import TimestampingFacility
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,16 @@ class RoundResult:
     global_pages_after: Optional[int]
     isolation_errors: tuple = ()
     capacity_exhausted: bool = False
+    session_pages_released: Optional[int] = None
+    session_pages_held: Optional[int] = None
+
+    @property
+    def tested_pfns(self):
+        if self.memtester.execution_error:
+            return ()
+        if self.memtester.tested_indices is None:
+            return self.pfns
+        return tuple(self.pfns[index] for index in self.memtester.tested_indices)
 
     @property
     def injection_effective(self):
@@ -40,8 +51,43 @@ class RoundResult:
 
 
 class SlowScheduler:
-    def __init__(self, device_path="/dev/phys_mem"):
+    def __init__(self, device_path="/dev/phys_mem", frame_status=None, retest_time=0):
         self.device_path = device_path
+        self.frame_status = frame_status
+        self.timestamping = TimestampingFacility()
+        self.retest_age = self.timestamping.seconds_to_timestamp(retest_time)
+
+    def _eligible_indices(self, pfns, now):
+        threshold = now - self.retest_age
+        with self.frame_status.locked_records():
+            eligible = []
+            for index, pfn in enumerate(pfns):
+                record = self.frame_status.read_record(pfn)
+                last_test = record.last_successful_test
+                if record.num_errors or not last_test or last_test <= threshold:
+                    eligible.append(index)
+            return tuple(eligible)
+
+    def record_frame_results(self, result):
+        """Use the same status record layout and timestamps as the PFN scanner."""
+        tested = set(result.tested_pfns)
+        failed = {result.pfns[finding.byte_offset // physmem.PAGE_SIZE]
+                  for finding in result.memtester.failures}
+        with self.frame_status.locked_records():
+            now = self.timestamping.timestamp()
+            for pfn in result.pfns:
+                record = self.frame_status.read_record(pfn)
+                record.last_claiming_attempt = now
+                # The allocation ABI has neither a per-PFN claim source nor its cost.
+                record.last_claiming_time_jiffies = 0
+                record.last_successful_claiming_method = 0
+                if pfn in failed:
+                    record.last_failed_test = now
+                    record.num_errors += 1
+                elif pfn in tested:
+                    record.last_successful_test = now
+                    record.num_errors = 0
+                self.frame_status.write_record(pfn, record)
 
     def run_round(self, run_id, page_count, tester, probe=True):
         if page_count < 1:
@@ -52,6 +98,7 @@ class SlowScheduler:
         errors = []
         capacity_exhausted = False
         result = None
+        finished = None
         reported = {}
         try:
             with physmem.Physmem(self.device_path) as device:
@@ -61,7 +108,11 @@ class SlowScheduler:
                 if len(set(pfns)) != len(pfns):
                     raise RuntimeError("driver returned duplicate PFNs")
                 tester.physmem_device = device
-                result = tester.test(page_infos)
+                if self.frame_status is not None and self.retest_age:
+                    eligible = self._eligible_indices(pfns, self.timestamping.timestamp())
+                    result = tester.test(page_infos, eligible)
+                else:
+                    result = tester.test(page_infos)
                 by_page = {}
                 for finding in result.failures:
                     index = finding.byte_offset // physmem.PAGE_SIZE
@@ -81,10 +132,13 @@ class SlowScheduler:
                         capacity_exhausted |= getattr(exc, "errno", None) == errno.ENOSPC
                         continue
                     reported[index] = (finding, origin)
+                finished = device.finish()
+                if finished.released != page_count - len(by_page) or finished.held != len(by_page):
+                    errors.append("session release counts disagree with the reported test pages")
         except OSError as exc:
             if result is None:
                 raise
-            errors.append(f"close test session: {exc}")
+            errors.append(f"finish or close test session: {exc}")
 
         # The last descriptor and all VMAs have closed before the new query.
         global_pages_after = None
@@ -95,8 +149,6 @@ class SlowScheduler:
                 global_pages_after = control.status().total_pages
                 batch_entries = tuple(control.entries(run_id))
                 entries = tuple(entry for entry in batch_entries if entry.session_id == session_id)
-            if not result.failures and global_pages_after != global_pages_before:
-                errors.append("healthy page release could not be confirmed from the pool count")
             if {entry.index for entry in entries} != reported.keys():
                 errors.append("driver isolation records disagree with reports")
             for entry in entries:
@@ -122,7 +174,9 @@ class SlowScheduler:
 
         return RoundResult(run_id, session_id, pfns, result, entries, probe_pfns,
                            global_pages_before, global_pages_after, tuple(errors),
-                           capacity_exhausted)
+                           capacity_exhausted,
+                           session_pages_released=finished.released if finished else None,
+                           session_pages_held=finished.held if finished else None)
 
     @staticmethod
     def _is_simulated(finding, injection):

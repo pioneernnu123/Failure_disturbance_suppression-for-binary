@@ -23,7 +23,10 @@ struct phys_mem_session {
 	struct phys_mem_test_page *pages;
 	__u32 num_pages;
 	__u32 map_refs;
+	__u32 released_pages;
+	__u32 held_pages;
 	bool allocating;
+	bool finished;
 };
 
 struct phys_mem_isolation {
@@ -54,6 +57,5 @@ extern unsigned int max_isolation_records;
 extern struct file_operations phys_mem_fops;
 
 int phys_mem_mmap(struct file *file, struct vm_area_struct *vma);
-void phys_mem_release_session(struct phys_mem_session *session);
 
 #endif
