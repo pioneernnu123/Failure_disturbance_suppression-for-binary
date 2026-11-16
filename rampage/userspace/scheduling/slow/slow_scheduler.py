@@ -1,5 +1,6 @@
 """One allocation, memtester, report, and isolation confirmation round."""
 
+from contextlib import ExitStack
 from dataclasses import dataclass
 import errno
 from typing import Optional
@@ -51,11 +52,13 @@ class RoundResult:
 
 
 class SlowScheduler:
-    def __init__(self, device_path="/dev/phys_mem", frame_status=None, retest_time=0):
+    def __init__(self, device_path="/dev/phys_mem", frame_status=None, retest_time=0,
+                 stop_requested=None):
         self.device_path = device_path
         self.frame_status = frame_status
         self.timestamping = TimestampingFacility()
         self.retest_age = self.timestamping.seconds_to_timestamp(retest_time)
+        self.stop_requested = stop_requested
 
     def _eligible_indices(self, pfns, now):
         threshold = now - self.retest_age
@@ -89,6 +92,40 @@ class SlowScheduler:
                     record.num_errors = 0
                 self.frame_status.write_record(pfn, record)
 
+    def _test_available_batch(self, run_id, page_count, tester, sessions):
+        skipped = []
+        while True:
+            device = sessions.enter_context(physmem.Physmem(self.device_path))
+            try:
+                session_id = device.allocate(run_id, page_count)
+            except OSError as exc:
+                if skipped and exc.errno in (errno.ENOSPC, errno.ENOMEM):
+                    # Release the pages reserved by the search before the next round.
+                    batch = skipped.pop()
+                    return batch, skipped
+                raise
+
+            page_infos = device.pages()
+            pfns = tuple(page.pfn for page in page_infos)
+            if len(set(pfns)) != len(pfns):
+                raise RuntimeError("driver returned duplicate PFNs")
+            tester.physmem_device = device
+            if self.frame_status is not None and self.retest_age:
+                eligible = self._eligible_indices(pfns, self.timestamping.timestamp())
+                result = tester.test(page_infos, eligible)
+            else:
+                result = tester.test(page_infos)
+            batch = device, session_id, pfns, result
+            if (result.tested_indices != () or result.execution_error or
+                    (self.stop_requested is not None and self.stop_requested())):
+                return batch, skipped
+
+            pool = device.status()
+            if pool.total_pages + page_count > min(pool.max_total_pages, pool.max_isolated_pages):
+                return batch, skipped
+            # Keep skipped pages out of the allocator while trying subsequent allocations.
+            skipped.append(batch)
+
     def run_round(self, run_id, page_count, tester, probe=True):
         if page_count < 1:
             raise ValueError("page_count must be positive")
@@ -101,18 +138,9 @@ class SlowScheduler:
         finished = None
         reported = {}
         try:
-            with physmem.Physmem(self.device_path) as device:
-                session_id = device.allocate(run_id, page_count)
-                page_infos = device.pages()
-                pfns = tuple(page.pfn for page in page_infos)
-                if len(set(pfns)) != len(pfns):
-                    raise RuntimeError("driver returned duplicate PFNs")
-                tester.physmem_device = device
-                if self.frame_status is not None and self.retest_age:
-                    eligible = self._eligible_indices(pfns, self.timestamping.timestamp())
-                    result = tester.test(page_infos, eligible)
-                else:
-                    result = tester.test(page_infos)
+            with ExitStack() as sessions:
+                batch, skipped = self._test_available_batch(run_id, page_count, tester, sessions)
+                device, session_id, pfns, result = batch
                 by_page = {}
                 for finding in result.failures:
                     index = finding.byte_offset // physmem.PAGE_SIZE
@@ -135,6 +163,10 @@ class SlowScheduler:
                 finished = device.finish()
                 if finished.released != page_count - len(by_page) or finished.held != len(by_page):
                     errors.append("session release counts disagree with the reported test pages")
+                for skipped_device, skipped_session_id, skipped_pfns, _ in skipped:
+                    released = skipped_device.finish()
+                    if released.released != len(skipped_pfns) or released.held:
+                        errors.append(f"could not confirm release of skipped session {skipped_session_id}")
         except OSError as exc:
             if result is None:
                 raise

@@ -35,8 +35,7 @@ import sys
 import time
 
 from frame import FrameStatus
-from injection_state import (DEFAULT_INJECTION_STATE_PATH, INJECTION_TYPE_NAMES,
-                             write_injection_type)
+from injection_state import DEFAULT_INJECTION_STATE_PATH, write_injection_type
 from physmem import PAGE_SIZE
 from run_memory_test import serialize_round
 from scheduling.slow.slow_scheduler import SlowScheduler
@@ -168,9 +167,6 @@ def main(argv=None):
         nonlocal stopped
         stopped = True
 
-    def report_injection(kind):
-        print("当前错误类型：%s" % INJECTION_TYPE_NAMES[kind], flush=True)
-
     previous_handler = signal.signal(signal.SIGINT, request_stop)
     attempt = pass_number = 0
     finish = "error"
@@ -178,8 +174,7 @@ def main(argv=None):
         tester = MemtesterWrapper(extra_args=options.memtester_args,
                                   injection_type=options.memtester_inject_type,
                                   injection_state_path=options.memtester_inject_file,
-                                  binary=options.memtester, initialize_injection=False,
-                                  report_injection=report_injection)
+                                  binary=options.memtester, initialize_injection=False)
         minimum_pages = 1 if tester.inject_page is None else tester.inject_page + 1
         if options.memtester_inject_type and tester.inject_page is None:
             parser.error("a nonzero --memtester-inject-type requires an injection page")
@@ -198,7 +193,8 @@ def main(argv=None):
         with serial_context as serdev, status_file.open_sparse(), (
                 log_path.open("a", encoding="utf-8", buffering=1)
                 if log_path else nullcontext()) as log:
-            scheduler = SlowScheduler(frame_status=status_file, retest_time=retest_time)
+            scheduler = SlowScheduler(frame_status=status_file, retest_time=retest_time,
+                                      stop_requested=lambda: stopped)
             write_injection_type(tester.injection_type, tester.injection_state_path)
             if log:
                 log.write(json.dumps({"event": "start", "run_id": run_id}) + "\n")

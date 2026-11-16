@@ -1,6 +1,7 @@
 """Protocol and orchestration checks that run without a kernel device."""
 
 import ctypes
+import errno
 from contextlib import redirect_stdout
 from io import StringIO
 import json
@@ -155,6 +156,79 @@ class ProtocolTests(unittest.TestCase):
 
 
 class SchedulerTests(unittest.TestCase):
+    def test_retest_search_keeps_skipped_pages_until_a_different_batch_is_found(self):
+        for capacity, contention, stop, expected_batches, expected_pfns in (
+                (6, False, False, 3, (104, 105)),
+                (4, False, False, 2, ()),
+                (6, True, False, 1, ()),
+                (6, False, True, 1, ())):
+            with self.subTest(capacity=capacity, contention=contention, stop=stop):
+                allocated = set()
+                batches = []
+                released = []
+
+                class Device:
+                    def __init__(self, _path):
+                        self.pfns = ()
+
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, *_):
+                        allocated.difference_update(self.pfns)
+
+                    def allocate(self, run_id, count):
+                        if contention and batches:
+                            raise OSError(errno.ENOSPC, "another session used the remaining capacity")
+                        free = set(range(100, 100 + capacity)) - allocated
+                        if len(free) < count:
+                            raise OSError(errno.ENOSPC, "pool full")
+                        self.pfns = tuple(sorted(free)[:count])
+                        batches.append(self.pfns)
+                        allocated.update(self.pfns)
+                        return len(batches)
+
+                    def pages(self):
+                        return [types.SimpleNamespace(pfn=pfn) for pfn in self.pfns]
+
+                    def status(self):
+                        return types.SimpleNamespace(total_pages=len(allocated),
+                                                     max_total_pages=capacity,
+                                                     max_isolated_pages=capacity)
+
+                    def finish(self):
+                        count = len(self.pfns)
+                        released.extend(self.pfns)
+                        allocated.difference_update(self.pfns)
+                        self.pfns = ()
+                        return types.SimpleNamespace(released=count, held=0)
+
+                    def entries(self, run_id):
+                        self_remaining = len(allocated)
+                        if self_remaining:
+                            raise AssertionError(f"{self_remaining} pages still reserved after the search")
+                        return iter(())
+
+                def test(pages, eligible):
+                    return MemtesterResult((), None, 0 if eligible else None,
+                                           tested_indices=eligible)
+
+                scheduler = SlowScheduler(frame_status=object(), retest_time=86400,
+                                          stop_requested=lambda: stop)
+                with mock.patch.object(physmem, "Physmem", Device), mock.patch.object(
+                        scheduler, "_eligible_indices",
+                        side_effect=lambda pfns, _: tuple(i for i, pfn in enumerate(pfns) if pfn >= 104)):
+                    result = scheduler.run_round(99, 2, types.SimpleNamespace(test=test), probe=False)
+
+                self.assertEqual(len(batches), expected_batches)
+                self.assertEqual(result.tested_pfns, expected_pfns)
+                self.assertEqual(result.session_pages_released, 2)
+                self.assertEqual(result.global_pages_after, 0)
+                self.assertEqual(result.isolation_errors, ())
+                self.assertFalse(result.capacity_exhausted)
+                self.assertEqual(sorted(released), list(range(100, 100 + 2 * expected_batches)))
+                self.assertFalse(allocated)
+
     def test_existing_pfn_status_file_controls_retest_and_keeps_history(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "status"
@@ -299,7 +373,8 @@ class SchedulerTests(unittest.TestCase):
         def fake_round(run_id, page_count, tester):
             self.assertIsNone(tester.binary)
             counts.append(page_count)
-            tester.report_injection(0)
+            if tester.report_injection is not None:
+                tester.report_injection(0)
             if len(counts) == 5:
                 signal.raise_signal(signal.SIGINT)
             held = (types.SimpleNamespace(index=5, pfn=0x1234, byte_offset=20480,
@@ -335,7 +410,7 @@ class SchedulerTests(unittest.TestCase):
         self.assertIn("---log reset---", lines)
         self.assertTrue(any(line.startswith("pass: 26 frames ") for line in lines))
         console = output.getvalue()
-        self.assertEqual(console.count("当前错误类型：None"), 5)
+        self.assertNotIn("当前错误类型", console)
         self.assertIn("Tested 26 frames in", console)
         self.assertIn("[WARNING] bad frame at pfn 00001234 (no serdev)", console)
         self.assertEqual(console.count("RUN_ID="), 1)
