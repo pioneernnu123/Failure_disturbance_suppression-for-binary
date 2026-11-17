@@ -221,7 +221,7 @@ def main(argv=None):
                         attempt += 1
                         if log:
                             record = serialize_round(result, "interactive", attempt,
-                                                     tester.injection_type)
+                                                     tester.injection_type, compact=True)
                             record["pass"] = pass_number
                             log.write(json.dumps(record, ensure_ascii=False) + "\n")
                         for entry in result.isolated:

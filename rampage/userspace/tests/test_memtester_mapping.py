@@ -365,6 +365,9 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(summary["cases"]["3-3-0008"]["valid"], 2)
         self.assertEqual(summary["cases"]["3-3-0008"]["successful"], 1)
+        self.assertEqual(summary["rounds"][2]["isolated"][0]["disposition"], "模块扣留")
+        compact = run_memory_test.serialize_round(failed, "interactive", 2, 2, compact=True)
+        self.assertEqual(compact["isolation_errors"], ["isolation query failed"])
 
     def test_interactive_local_pass_repeats_until_sigint_with_one_run_id(self):
         counts = []
@@ -407,6 +410,12 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(records[-1]["event"], "stop")
         self.assertEqual(records[-1]["reason"], "interrupted")
         self.assertEqual(len({record["run_id"] for record in records}), 1)
+        self.assertEqual(records[2]["isolated"], [
+            {"disposition": "已隔离", "index": 5, "pfn": 0x1234, "byte_offset": 20480,
+             "error_type": 1, "map_refs": 0, "module_refs": 1}])
+        for field in ("global_pages_before", "global_pages_after", "execution_error",
+                      "isolation_errors", "capacity_exhausted"):
+            self.assertNotIn(field, records[2])
         self.assertIn("---log reset---", lines)
         self.assertTrue(any(line.startswith("pass: 26 frames ") for line in lines))
         console = output.getvalue()

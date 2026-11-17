@@ -23,8 +23,8 @@ CASES = {
 }
 
 
-def serialize_round(result, case_id, attempt, injection_type):
-    return {
+def serialize_round(result, case_id, attempt, injection_type, *, compact=False):
+    record = {
         "case": case_id,
         "attempt": attempt,
         "run_id": result.run_id,
@@ -35,7 +35,8 @@ def serialize_round(result, case_id, attempt, injection_type):
         "injection": (asdict(result.memtester.injection)
                       if result.memtester.injection else None),
         "failures": [asdict(item) for item in result.memtester.failures],
-        "isolated": [{"disposition": "模块扣留", "index": item.index, "pfn": item.pfn,
+        "isolated": [{"disposition": "已隔离" if compact else "模块扣留",
+                      "index": item.index, "pfn": item.pfn,
                       "byte_offset": item.byte_offset,
                       "error_type": item.error_type, "origin": item.origin,
                       "state": item.state, "map_refs": item.map_refs,
@@ -55,6 +56,15 @@ def serialize_round(result, case_id, attempt, injection_type):
         "effective": result.injection_effective,
         "intercepted": result.interception_success,
     }
+    if compact:
+        for entry in record["isolated"]:
+            for field in ("origin", "state", "page_refcount", "last_error"):
+                del entry[field]
+        del record["global_pages_before"], record["global_pages_after"]
+        for field in ("execution_error", "isolation_errors", "capacity_exhausted"):
+            if not record[field]:
+                del record[field]
+    return record
 
 
 def read_build_info():
