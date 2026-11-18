@@ -54,10 +54,10 @@ sudo ./app/run_memory_test.dist/run-memory-test --memtester=./bin/memtester
 
 ## 四 取证和恢复
 
-检测退出后，在解包目录执行。出现提示时，输入本次运行打印的 `RUN_ID` 数字并回车。
+检测退出后，在解包目录执行。将第一行等号后的 `实际批次号` 换成本次检测打印的 `RUN_ID` 数字，只填一次。以下命令在同一个终端执行。
 
 ```bash
-read -r -p '输入本次 RUN_ID：' RUN_ID
+RUN_ID=实际批次号
 sudo ./app/phys_memctl.dist/phys_memctl status --run-id "$RUN_ID" | tee isolation-status.txt
 ```
 
